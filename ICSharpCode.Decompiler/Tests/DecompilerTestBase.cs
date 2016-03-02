@@ -27,6 +27,10 @@ using dnSpy.Decompiler.Shared;
 using ICSharpCode.Decompiler.Ast;
 using ICSharpCode.Decompiler.Tests.Helpers;
 using Microsoft.CSharp;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Emit;
+using System.Reflection;
 
 namespace ICSharpCode.Decompiler.Tests
 {
@@ -46,7 +50,7 @@ namespace ICSharpCode.Decompiler.Tests
 		protected static void AssertRoundtripCode(string fileName, bool optimize = false, bool useDebug = false, int compilerVersion = 4)
 		{
 			var code = RemoveIgnorableLines(File.ReadLines(fileName));
-			AssemblyDef assembly = CompileLegacy(code, optimize, useDebug, compilerVersion);
+			AssemblyDef assembly = CompileRoslyn(code, optimize, useDebug);
 
 			AstBuilder decompiler = AstBuilder.CreateAstBuilderTestContext(assembly.ManifestModule);
 			decompiler.AddAssembly(assembly);
@@ -83,6 +87,48 @@ namespace ICSharpCode.Decompiler.Tests
 				File.Delete(results.PathToAssembly);
 				results.TempFiles.Delete();
 			}
+		}
+
+		protected static AssemblyDef CompileRoslyn(string code, bool optimize, bool useDebug)
+		{
+			var syntaxTree = CSharpSyntaxTree.ParseText(code);
+
+			string assemblyName = Path.GetRandomFileName();
+			MetadataReference[] references = new MetadataReference[]
+			{
+	MetadataReference.CreateFromFile(typeof(object).Assembly.Location),
+	MetadataReference.CreateFromFile(typeof(Enumerable).Assembly.Location)
+			};
+
+			CSharpCompilation compilation = CSharpCompilation.Create(
+				assemblyName,
+				syntaxTrees: new[] { syntaxTree },
+				references: references,
+				options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+
+
+			using (var ms = new MemoryStream())
+			{
+				EmitResult result = compilation.Emit(ms);
+
+				if (!result.Success)
+				{
+					IEnumerable<Diagnostic> failures = result.Diagnostics.Where(diagnostic =>
+						diagnostic.IsWarningAsError ||
+						diagnostic.Severity == DiagnosticSeverity.Error);
+
+					foreach (Diagnostic diagnostic in failures)
+					{
+						Console.Error.WriteLine("{0}: {1}", diagnostic.Id, diagnostic.GetMessage());
+					}
+					throw new Exception("Roslyn compilation failed!");
+				}
+				else
+				{
+					return AssemblyDef.Load(ms.ToArray());
+				}
+			}
+
 		}
 	}
 }
